@@ -4,11 +4,12 @@ import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatCurrency } from '@/lib/utils'
 import type { IncomeSettings, Account } from '@/lib/types'
-import { User, Users, CreditCard, FileSpreadsheet, Plus, Trash2, Save, CheckCircle, AlertCircle, Brain } from 'lucide-react'
+import { User, Users, CreditCard, FileSpreadsheet, Plus, Trash2, Save, CheckCircle, AlertCircle, Brain, Tag } from 'lucide-react'
 
 interface Toast { message: string; type: 'success' | 'error' }
 interface AccountForm { name: string; type: string; institution: string; balance: string }
 interface Rule { id: string; pattern: string; category_id: string; category_name?: string; notes?: string }
+interface Category { id: string; name: string; color: string; is_income: boolean }
 
 function SectionHeader({ icon: Icon, title, subtitle }: { icon: React.ElementType; title: string; subtitle: string }) {
   return (
@@ -28,6 +29,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <div><label className="label">{label}</label>{children}</div>
 }
 
+const PRESET_COLORS = ['#1D9E75','#378ADD','#EF9F27','#7F77DD','#D85A30','#D4537E','#639922','#5DCAA5','#888780','#4dab8e']
+
 export default function SettingsPage() {
   const supabase = createClient()
   const [toast, setToast] = useState<Toast | null>(null)
@@ -45,9 +48,11 @@ export default function SettingsPage() {
   const [newAccount, setNewAccount] = useState<AccountForm>({ name: '', type: 'checking', institution: '', balance: '' })
   const [showAddAccount, setShowAddAccount] = useState(false)
   const [rules, setRules] = useState<Rule[]>([])
-  const [categories, setCategories] = useState<any[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
   const [showAddRule, setShowAddRule] = useState(false)
   const [newRule, setNewRule] = useState({ pattern: '', category_id: '', notes: '' })
+  const [showAddCategory, setShowAddCategory] = useState(false)
+  const [newCategory, setNewCategory] = useState({ name: '', color: '#378ADD', is_income: false })
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type })
@@ -112,6 +117,27 @@ export default function SettingsPage() {
     if (error) { showToast(error.message, 'error'); return }
     setAccounts(prev => prev.filter(a => a.id !== id))
     showToast('Account removed')
+  }
+
+  async function addCategory() {
+    if (!newCategory.name.trim()) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data, error } = await supabase.from('categories').insert({
+      user_id: user.id, name: newCategory.name, color: newCategory.color, is_income: newCategory.is_income,
+    }).select().single()
+    if (error) { showToast(error.message, 'error'); return }
+    setCategories(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)))
+    setNewCategory({ name: '', color: '#378ADD', is_income: false })
+    setShowAddCategory(false)
+    showToast('Category added')
+  }
+
+  async function deleteCategory(id: string) {
+    const { error } = await supabase.from('categories').delete().eq('id', id)
+    if (error) { showToast(error.message, 'error'); return }
+    setCategories(prev => prev.filter(c => c.id !== id))
+    showToast('Category deleted')
   }
 
   async function addRule() {
@@ -214,6 +240,54 @@ export default function SettingsPage() {
           </div>
         ) : (
           <button className="btn-secondary" onClick={() => setShowAddAccount(true)}><Plus className="w-4 h-4" />Add account</button>
+        )}
+      </div>
+
+      {/* Categories */}
+      <div className="card">
+        <SectionHeader icon={Tag} title="Categories" subtitle="Manage your spending and income categories" />
+        {categories.length > 0 && (
+          <div className="mb-4 border border-gray-100 rounded-lg overflow-hidden">
+            {categories.map((c, i) => (
+              <div key={c.id} className={`flex items-center justify-between px-4 py-3 ${i < categories.length - 1 ? 'border-b border-gray-100' : ''}`}>
+                <div className="flex items-center gap-3">
+                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: c.color }} />
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{c.name}</p>
+                    <p className="text-xs text-gray-400">{c.is_income ? 'Income' : 'Expense'}</p>
+                  </div>
+                </div>
+                <button onClick={() => deleteCategory(c.id)} className="text-gray-300 hover:text-red-400 transition-colors"><Trash2 className="w-4 h-4" /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        {showAddCategory ? (
+          <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+            <p className="text-sm font-medium text-gray-700">Add category</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Category name"><input className="input" placeholder="e.g. Golf" value={newCategory.name} onChange={e => setNewCategory(p => ({ ...p, name: e.target.value }))} /></Field>
+              <Field label="Color">
+                <div className="flex gap-2 flex-wrap mt-1">
+                  {PRESET_COLORS.map(color => (
+                    <button key={color} onClick={() => setNewCategory(p => ({ ...p, color }))}
+                      className={`w-7 h-7 rounded-full border-2 transition-all ${newCategory.color === color ? 'border-gray-900 scale-110' : 'border-transparent'}`}
+                      style={{ background: color }} />
+                  ))}
+                </div>
+              </Field>
+            </div>
+            <div className="flex items-center gap-2">
+              <input type="checkbox" id="is_income" checked={newCategory.is_income} onChange={e => setNewCategory(p => ({ ...p, is_income: e.target.checked }))} className="rounded" />
+              <label htmlFor="is_income" className="text-sm text-gray-700">This is an income category</label>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn-primary" onClick={addCategory}><Plus className="w-4 h-4" />Add category</button>
+              <button className="btn-secondary" onClick={() => setShowAddCategory(false)}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <button className="btn-secondary" onClick={() => setShowAddCategory(true)}><Plus className="w-4 h-4" />Add category</button>
         )}
       </div>
 
