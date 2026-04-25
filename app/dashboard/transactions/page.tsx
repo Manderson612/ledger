@@ -134,8 +134,15 @@ export default function TransactionsPage() {
             const { categorized } = await response.json()
             if (categorized && Array.isArray(categorized)) {
               const catMap: Record<string, string> = {}
-              categorized.forEach((c: { id: string; category_id: string }) => { catMap[c.id] = c.category_id })
-              parsed.forEach(t => { if (catMap[t.id]) t.category_id = catMap[t.id] })
+const typeMap: Record<string, string> = {}
+categorized.forEach((c: { id: string; category_id: string; type?: string }) => {
+  catMap[c.id] = c.category_id
+  if (c.type) typeMap[c.id] = c.type
+})
+parsed.forEach(t => {
+  if (catMap[t.id]) t.category_id = catMap[t.id]
+  if (typeMap[t.id]) t.type = typeMap[t.id]
+})
             }
           } catch (err) {
             console.error('AI categorization failed:', err)
@@ -275,6 +282,7 @@ export default function TransactionsPage() {
           <option value="">All types</option>
           <option value="income">Income</option>
           <option value="expense">Expense</option>
+          <option value="transfer">Transfer</option>
         </select>
         {(filters.search || filters.account || filters.category || filters.type) && (
           <button className="btn-ghost text-xs" onClick={() => setFilters({ account: '', category: '', type: '', search: '' })}><X className="w-3.5 h-3.5" />Clear</button>
@@ -317,9 +325,9 @@ export default function TransactionsPage() {
                       </select>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-400 hidden md:table-cell">{(t.account as any)?.name || '—'}</td>
-                    <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${t.type === 'income' ? 'text-emerald-600' : 'text-gray-800'}`}>
-                      {t.type === 'income' ? '+' : ''}{formatCurrency(t.amount)}
-                    </td>
+                    <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${t.type === 'income' ? 'text-emerald-600' : t.type === 'transfer' ? 'text-gray-400' : 'text-gray-800'}`}>
+  {t.type === 'income' ? '+' : t.type === 'transfer' ? '↔ ' : ''}{formatCurrency(t.amount)}
+</td>
                     <td className="px-2 py-2.5">
                       <button onClick={() => deleteTransaction(t.id)} className="text-gray-200 hover:text-red-400 transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                     </td>

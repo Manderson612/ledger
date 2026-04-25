@@ -41,11 +41,12 @@ CATEGORIZATION GUIDELINES:
 - Mortgage, rent → Housing
 - Amazon purchases → use context clues, default to Misc / Other if unclear
 - Payroll, direct deposit, income → Income
-- Credit card payments, loan payments → use the users custom rules
-- Transfers between accounts → Misc / Other unless a rule applies
+- Credit card payments (Apple Card, Savor, any card payment) → type should be "transfer"
+- Transfers between accounts → type should be "transfer"
+- Loan payments (car, student, mortgage) → use the users custom rules as expense
 
-Respond ONLY with a JSON array, no explanation, no markdown, no backticks. Format:
-[{"id":"transaction-id","category_id":"category-uuid"}]`
+Respond ONLY with a JSON array, no explanation, no markdown, no backticks. Format: [{"id":"transaction-id","category_id":"category-uuid","type":"expense"}]
+Override type to "transfer" for credit card payments and account transfers. Keep "income" for payroll/deposits. Keep "expense" for everything else.`
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
