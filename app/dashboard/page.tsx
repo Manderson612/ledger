@@ -111,7 +111,7 @@ export default function DashboardPage() {
         spendByCat[t.category_id] = (spendByCat[t.category_id] || 0) + t.amount
       }
     }
-    const budgets: BudgetWithActuals[] = (budgetRows || []).map((b: { id: string; category_id: string; amount: number; month: string; user_id: string; created_at: string }) => {
+    const budgets: any[] = (budgetRows || []).map((b: any) => {
       const spent = spendByCat[b.category_id] || 0
       return {
         ...b,
