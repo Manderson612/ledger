@@ -1,20 +1,14 @@
-import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
-import './globals.css'
+import Sidebar from '@/components/layout/Sidebar'
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-sans' })
-
-export const metadata: Metadata = {
-  title: 'Ledger',
-  description: 'Personal finance tracker',
-}
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={inter.variable}>
-      <body className="bg-gray-50 text-gray-900 antialiased">
-        {children}
-      </body>
-    </html>
+    <div className="flex min-h-screen">
+      <Sidebar />
+      <main className="flex-1 ml-[220px] min-h-screen bg-gray-50">
+        <div className="max-w-7xl mx-auto px-6 py-6">
+          {children}
+        </div>
+      </main>
+    </div>
   )
 }
