@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import type { Transaction, Account, Category } from '@/lib/types'
-import { Upload, Search, Plus, Trash2, CheckCircle, AlertCircle, X, Sparkles, FileText, RefreshCw, Maximize2, Minimize2, BookmarkPlus } from 'lucide-react'
+import { Upload, Search, Plus, Trash2, CheckCircle, AlertCircle, X, Sparkles, FileText, RefreshCw, Maximize2, Minimize2, BookmarkPlus, Lightbulb } from 'lucide-react'
 import Papa from 'papaparse'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -225,6 +225,10 @@ export default function TransactionsPage() {
   const [creatingCatFor, setCreatingCatFor] = useState<string | null>(null)
   const [newCatName, setNewCatName] = useState('')
   const [creatingCat, setCreatingCat] = useState(false)
+
+  // ── Similar Transactions ──────────────────────────────────────────────────
+  const [similarOpen, setSimilarOpen] = useState<string | null>(null)
+  const [similarResults, setSimilarResults] = useState<Record<string, Transaction[]>>({})
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type })
@@ -473,7 +477,51 @@ export default function TransactionsPage() {
     setCreatingCat(false)
   }
 
-  // ── Confirm Import ────────────────────────────────────────────────────────
+  // ── Similar Transaction Finder ────────────────────────────────────────────
+
+  function findSimilarTxns(t: ReviewTxn): Transaction[] {
+    const dayOfMonth = new Date(t.date + 'T12:00:00').getDate()
+    const descWords = t.description.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+
+    const scored = transactions.map(existing => {
+      let score = 0
+      const existingDesc = existing.description.toLowerCase()
+      // Description word overlap
+      const wordMatches = descWords.filter(w => existingDesc.includes(w)).length
+      score += wordMatches * 3
+      // Amount match
+      if (Math.abs(existing.amount - t.amount) < 2) score += 5
+      else if (Math.abs(existing.amount - t.amount) < 10) score += 2
+      // Day of month match
+      const existingDay = new Date(existing.date + 'T12:00:00').getDate()
+      if (Math.abs(existingDay - dayOfMonth) <= 3) score += 2
+      return { existing, score }
+    })
+
+    return scored
+      .filter(s => s.score >= 3)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map(s => s.existing)
+  }
+
+  function toggleSimilar(t: ReviewTxn) {
+    if (similarOpen === t.id) { setSimilarOpen(null); return }
+    const results = findSimilarTxns(t)
+    setSimilarResults(prev => ({ ...prev, [t.id]: results }))
+    setSimilarOpen(t.id)
+  }
+
+  function applySimilar(txnId: string, similar: Transaction) {
+    updateReviewTxn(txnId, {
+      type: similar.type as ReviewTxn['type'],
+      categoryId: similar.category_id || null,
+      categoryName: (similar as any).category?.name || '',
+      isRecurring: (similar as any).is_recurring || false,
+      recurringPeriod: (similar as any).recurring_period || null,
+    })
+    setSimilarOpen(null)
+  }
 
   async function confirmImport() {
     setSaving(true)
@@ -835,8 +883,11 @@ export default function TransactionsPage() {
                         const isPaired = !!t.pairId
                         const isLow = t.confidence < 0.65 && !t.ruleMatched
                         const rowClass = t.ruleMatched ? 'bg-brand-50/30' : isPaired ? 'bg-amber-50/50' : isLow ? 'bg-red-50/50' : ''
+                        const isSimilarOpen = similarOpen === t.id
+                        const similar = similarResults[t.id] || []
                         return (
-                          <tr key={t.id} className={`border-b border-gray-50 ${rowClass}`}>
+                          <>
+                          <tr key={t.id} className={`border-b ${isSimilarOpen ? 'border-brand-100' : 'border-gray-50'} ${rowClass}`}>
                             <td className="px-4 py-2 text-xs text-gray-400 whitespace-nowrap">{t.date}</td>
                             <td className="px-4 py-2">
                               <p className="text-gray-800 text-xs font-medium" title={t.description} style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</p>
@@ -846,6 +897,9 @@ export default function TransactionsPage() {
                                 {isLow && <span className="text-[10px] text-red-500 bg-red-50 rounded px-1">review</span>}
                                 <button onClick={() => openSaveRule(t)} className="text-[10px] text-brand-500 hover:text-brand-700 flex items-center gap-0.5 ml-1">
                                   <BookmarkPlus className="w-2.5 h-2.5" />save rule
+                                </button>
+                                <button onClick={() => toggleSimilar(t)} className={`text-[10px] flex items-center gap-0.5 ml-1 ${isSimilarOpen ? 'text-amber-600' : 'text-gray-400 hover:text-amber-500'}`}>
+                                  <Lightbulb className="w-2.5 h-2.5" />similar
                                 </button>
                               </div>
                             </td>
@@ -899,6 +953,42 @@ export default function TransactionsPage() {
                               {t.reasoning && <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">{t.reasoning}</p>}
                             </td>
                           </tr>
+                          {isSimilarOpen && (
+                            <tr key={`${t.id}-similar`} className="border-b border-brand-100 bg-amber-50/30">
+                              <td colSpan={7} className="px-6 py-3">
+                                <p className="text-xs font-medium text-gray-600 mb-2 flex items-center gap-1.5">
+                                  <Lightbulb className="w-3 h-3 text-amber-500" />
+                                  Similar transactions from your history
+                                </p>
+                                {similar.length === 0 ? (
+                                  <p className="text-xs text-gray-400">No similar transactions found in your history.</p>
+                                ) : (
+                                  <div className="space-y-1.5">
+                                    {similar.map(s => (
+                                      <div key={s.id} className="flex items-center justify-between gap-4 bg-white border border-gray-100 rounded-lg px-3 py-2">
+                                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                                          <span className="text-xs text-gray-400 whitespace-nowrap flex-shrink-0">{formatDate(s.date)}</span>
+                                          <span className="text-xs text-gray-700 font-medium truncate">{s.description}</span>
+                                          {(s as any).category?.name && (
+                                            <span className="text-[10px] bg-gray-100 text-gray-500 rounded px-1.5 py-0.5 whitespace-nowrap flex-shrink-0">{(s as any).category.name}</span>
+                                          )}
+                                          <span className={`text-[10px] rounded px-1.5 py-0.5 whitespace-nowrap flex-shrink-0 ${s.type === 'income' ? 'bg-emerald-50 text-emerald-700' : s.type === 'transfer' ? 'bg-gray-100 text-gray-500' : 'bg-red-50 text-red-600'}`}>{s.type}</span>
+                                          {(s as any).is_recurring && <span className="text-[10px] bg-brand-50 text-brand-600 rounded px-1.5 py-0.5 whitespace-nowrap flex-shrink-0">{(s as any).recurring_period || 'recurring'}</span>}
+                                        </div>
+                                        <div className="flex items-center gap-3 flex-shrink-0">
+                                          <span className={`text-xs font-semibold tabular-nums ${s.type === 'income' ? 'text-emerald-600' : 'text-gray-700'}`}>{formatCurrency(s.amount)}</span>
+                                          <button onClick={() => applySimilar(t.id, s)} className="text-xs text-brand-600 hover:text-brand-800 font-medium bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded px-2 py-1 transition-colors">
+                                            Apply
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                          </>
                         )
                       })}
                     </tbody>
