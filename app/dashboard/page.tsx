@@ -137,9 +137,11 @@ export default function DashboardPage() {
 
     // Upcoming paychecks (this month + next 30 days)
     const allPaychecks: PaycheckEvent[] = []
-    for (const s of (incomeSettings as IncomeSettings[] || [])) {
-      allPaychecks.push(...getPaychecksForMonth(s, now))
-    }
+const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+for (const s of (incomeSettings as IncomeSettings[] || [])) {
+  allPaychecks.push(...getPaychecksForMonth(s, now))
+  allPaychecks.push(...getPaychecksForMonth(s, nextMonth))
+}
     const upcomingPaychecks = allPaychecks
       .filter(p => p.date >= format(today, 'yyyy-MM-dd'))
       .slice(0, 4)
