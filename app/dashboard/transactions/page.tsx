@@ -17,12 +17,14 @@ type ImportStep = 'idle' | 'select' | 'classifying' | 'review'
 
 interface AppRule {
   id: string
-  pattern: string
+  pattern: string | null
   category_id: string | null
   category_name: string | null
   transaction_type: 'income' | 'expense' | 'transfer'
   is_recurring: boolean
   recurring_period: string | null
+  amount: number | null
+  amount_tolerance: number | null
 }
 
 interface PendingFile {
@@ -216,7 +218,7 @@ export default function TransactionsPage() {
 
   // ── Save As Rule ──────────────────────────────────────────────────────────
   const [saveRuleFor, setSaveRuleFor] = useState<ReviewTxn | null>(null)
-  const [saveRuleForm, setSaveRuleForm] = useState({ pattern: '', transaction_type: 'expense' as 'income'|'expense'|'transfer', category_id: '', is_recurring: false, recurring_period: '' })
+  const [saveRuleForm, setSaveRuleForm] = useState({ pattern: '', transaction_type: 'expense' as 'income'|'expense'|'transfer', category_id: '', is_recurring: false, recurring_period: '', amount: '', amount_tolerance: '1.00' })
   const [savingRule, setSavingRule] = useState(false)
 
   // ── Inline Category Creation ──────────────────────────────────────────────
@@ -323,10 +325,19 @@ export default function TransactionsPage() {
 
     setClassifyProgress(`Applying ${rules.length} rules to ${toClassify.length} transactions...`)
 
-    // Apply rules first (exact contains match, case insensitive)
+    // Apply rules first — match on description, amount, or both
     const ruleMatched: Record<string, ReviewTxn> = {}
     const toClassifyAI = toClassify.filter(t => {
-      const match = rules.find(r => t.description.toLowerCase().includes(r.pattern.toLowerCase()))
+      const match = rules.find((r: AppRule) => {
+        const hasPattern = !!r.pattern
+        const hasAmount = r.amount != null
+        const descMatch = hasPattern ? t.description.toLowerCase().includes(r.pattern!.toLowerCase()) : true
+        const amountMatch = hasAmount ? Math.abs(t.amount - r.amount!) <= (r.amount_tolerance ?? 1.00) : true
+        if (hasPattern && hasAmount) return descMatch && amountMatch
+        if (hasPattern) return descMatch
+        if (hasAmount) return amountMatch
+        return false
+      })
       if (match) {
         const meta = idToMeta[t.id]
         ruleMatched[t.id] = {
@@ -417,25 +428,27 @@ export default function TransactionsPage() {
   function openSaveRule(t: ReviewTxn) {
     const words = t.description.trim().split(/\s+/)
     const pattern = words.slice(0, Math.min(3, words.length)).join(' ')
-    setSaveRuleForm({ pattern, transaction_type: t.type, category_id: t.categoryId || '', is_recurring: t.isRecurring, recurring_period: t.recurringPeriod || '' })
+    setSaveRuleForm({ pattern, transaction_type: t.type, category_id: t.categoryId || '', is_recurring: t.isRecurring, recurring_period: t.recurringPeriod || '', amount: t.amount.toFixed(2), amount_tolerance: '1.00' })
     setSaveRuleFor(t)
   }
 
   async function saveAsRule() {
-    if (!saveRuleForm.pattern.trim()) return
+    if (!saveRuleForm.pattern.trim() && !saveRuleForm.amount) return
     setSavingRule(true)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { setSavingRule(false); return }
     const { error } = await supabase.from('category_rules').insert({
       user_id: user.id,
-      pattern: saveRuleForm.pattern.trim(),
+      pattern: saveRuleForm.pattern.trim() || null,
       category_id: saveRuleForm.transaction_type === 'transfer' ? null : saveRuleForm.category_id || null,
       transaction_type: saveRuleForm.transaction_type,
       is_recurring: saveRuleForm.is_recurring,
       recurring_period: saveRuleForm.is_recurring && saveRuleForm.recurring_period ? saveRuleForm.recurring_period : null,
+      amount: saveRuleForm.amount ? parseFloat(saveRuleForm.amount) : null,
+      amount_tolerance: saveRuleForm.amount ? parseFloat(saveRuleForm.amount_tolerance || '1.00') : null,
     })
     if (error) { showToast('Failed to save rule', 'error') }
-    else { showToast(`Rule saved — "${saveRuleForm.pattern}" will auto-classify on future imports`); setSaveRuleFor(null) }
+    else { showToast(`Rule saved — will auto-classify on future imports`); setSaveRuleFor(null) }
     setSavingRule(false)
   }
 
@@ -953,6 +966,21 @@ export default function TransactionsPage() {
                     <option value="">Select period...</option>
                     {PERIODS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Amount (optional)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                    <input className="input pl-6" type="number" step="0.01" placeholder="e.g. 446.00" value={saveRuleForm.amount} onChange={e => setSaveRuleForm(p => ({ ...p, amount: e.target.value }))} />
+                  </div>
+                </div>
+                {saveRuleForm.amount && (
+                  <div>
+                    <label className="label">Tolerance ±$</label>
+                    <input className="input" type="number" step="0.01" placeholder="1.00" value={saveRuleForm.amount_tolerance} onChange={e => setSaveRuleForm(p => ({ ...p, amount_tolerance: e.target.value }))} />
+                  </div>
                 )}
               </div>
             </div>

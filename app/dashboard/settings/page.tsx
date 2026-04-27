@@ -17,6 +17,8 @@ interface Rule {
   transaction_type: 'income' | 'expense' | 'transfer'
   is_recurring: boolean
   recurring_period: string | null
+  amount: number | null
+  amount_tolerance: number | null
 }
 interface Category { id: string; name: string; color: string; is_income: boolean }
 
@@ -79,7 +81,8 @@ export default function SettingsPage() {
     pattern: string; category_id: string; notes: string;
     transaction_type: 'income' | 'expense' | 'transfer';
     is_recurring: boolean; recurring_period: string;
-  }>({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '' })
+    amount: string; amount_tolerance: string;
+  }>({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '', amount: '', amount_tolerance: '1.00' })
   const [showAddCategory, setShowAddCategory] = useState(false)
   const [newCategory, setNewCategory] = useState({ name: '', color: '#378ADD', is_income: false })
 
@@ -170,22 +173,24 @@ export default function SettingsPage() {
   }
 
   async function addRule() {
-    if (!newRule.pattern.trim()) return
+    if (!newRule.pattern.trim() && !newRule.amount) return
     if (newRule.transaction_type !== 'transfer' && !newRule.category_id) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { data, error } = await supabase.from('category_rules').insert({
       user_id: user.id,
-      pattern: newRule.pattern.trim(),
+      pattern: newRule.pattern.trim() || null,
       category_id: newRule.transaction_type === 'transfer' ? null : newRule.category_id || null,
       notes: newRule.notes || null,
       transaction_type: newRule.transaction_type,
       is_recurring: newRule.is_recurring,
       recurring_period: newRule.is_recurring && newRule.recurring_period ? newRule.recurring_period : null,
+      amount: newRule.amount ? parseFloat(newRule.amount) : null,
+      amount_tolerance: newRule.amount ? parseFloat(newRule.amount_tolerance || '1.00') : null,
     }).select('*, category:categories(name)').single()
     if (error) { showToast(error.message, 'error'); return }
     setRules(prev => [...prev, { ...data, category_name: (data as any).category?.name }])
-    setNewRule({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '' })
+    setNewRule({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '', amount: '', amount_tolerance: '1.00' })
     setShowAddRule(false)
     showToast('Rule added')
   }
@@ -336,11 +341,16 @@ export default function SettingsPage() {
               <div key={r.id} className={`flex items-start justify-between px-4 py-3 ${i < rules.length - 1 ? 'border-b border-gray-100' : ''}`}>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium text-gray-800">{r.pattern}</p>
+                    <p className="text-sm font-medium text-gray-800">{r.pattern || <span className="text-gray-400 italic">any description</span>}</p>
                     <TypeBadge type={r.transaction_type || 'expense'} />
                     {r.is_recurring && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-50 text-brand-600 font-medium">
                         {r.recurring_period || 'recurring'}
+                      </span>
+                    )}
+                    {r.amount != null && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+                        ${r.amount.toFixed(2)} ±${(r.amount_tolerance ?? 1).toFixed(2)}
                       </span>
                     )}
                   </div>
@@ -359,8 +369,8 @@ export default function SettingsPage() {
           <div className="border border-gray-200 rounded-lg p-4 space-y-4">
             <p className="text-sm font-medium text-gray-700">Add rule</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Field label="Pattern (merchant name or keyword)">
-                <input className="input" placeholder="e.g. NIAGARA'S CHOICE" value={newRule.pattern} onChange={e => setNewRule(p => ({ ...p, pattern: e.target.value }))} />
+              <Field label="Pattern (description contains...)">
+                <input className="input" placeholder="e.g. NIAGARA'S CHOICE (optional if amount set)" value={newRule.pattern} onChange={e => setNewRule(p => ({ ...p, pattern: e.target.value }))} />
               </Field>
               <Field label="Transaction type">
                 <select className="input" value={newRule.transaction_type} onChange={e => setNewRule(p => ({ ...p, transaction_type: e.target.value as any, category_id: '' }))}>
@@ -380,6 +390,17 @@ export default function SettingsPage() {
               <Field label="Notes (optional)">
                 <input className="input" placeholder="e.g. Car payment" value={newRule.notes} onChange={e => setNewRule(p => ({ ...p, notes: e.target.value }))} />
               </Field>
+              <Field label="Amount (optional)">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                  <input className="input pl-6" type="number" placeholder="e.g. 446.00" value={newRule.amount} onChange={e => setNewRule(p => ({ ...p, amount: e.target.value }))} />
+                </div>
+              </Field>
+              {newRule.amount && (
+                <Field label="Amount tolerance ±$">
+                  <input className="input" type="number" step="0.01" placeholder="1.00" value={newRule.amount_tolerance} onChange={e => setNewRule(p => ({ ...p, amount_tolerance: e.target.value }))} />
+                </Field>
+              )}
             </div>
 
             {/* Recurring toggle */}
@@ -409,7 +430,7 @@ export default function SettingsPage() {
               <button
                 className="btn-primary"
                 onClick={addRule}
-                disabled={!newRule.pattern || (newRule.transaction_type !== 'transfer' && !newRule.category_id)}
+                disabled={(!newRule.pattern && !newRule.amount) || (newRule.transaction_type !== 'transfer' && !newRule.category_id)}
               >
                 <Plus className="w-4 h-4" />Add rule
               </button>
