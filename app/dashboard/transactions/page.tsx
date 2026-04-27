@@ -4,10 +4,10 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import type { Transaction, Account, Category } from '@/lib/types'
-import { Upload, Search, Plus, Trash2, CheckCircle, AlertCircle, X, Sparkles, FileText, RefreshCw } from 'lucide-react'
+import { Upload, Search, Plus, Trash2, CheckCircle, AlertCircle, X, Sparkles, FileText, RefreshCw, Maximize2, Minimize2, BookmarkPlus } from 'lucide-react'
 import Papa from 'papaparse'
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Toast { message: string; type: 'success' | 'error' }
 interface Filters { account: string; category: string; type: string; search: string }
@@ -15,12 +15,22 @@ interface Filters { account: string; category: string; type: string; search: str
 type CsvFormat = 'checking' | 'capital-one-card' | 'apple-card'
 type ImportStep = 'idle' | 'select' | 'classifying' | 'review'
 
+interface AppRule {
+  id: string
+  pattern: string
+  category_id: string | null
+  category_name: string | null
+  transaction_type: 'income' | 'expense' | 'transfer'
+  is_recurring: boolean
+  recurring_period: string | null
+}
+
 interface PendingFile {
   fileId: string
   fileName: string
   format: CsvFormat
-  detectedCards: string[]        // e.g. ['9043', '1555'] for Quicksilver
-  accountId: string              // which account in the DB this maps to
+  detectedCards: string[]
+  accountId: string
   parsedRows: ParsedRow[]
 }
 
@@ -28,8 +38,8 @@ interface ParsedRow {
   date: string
   description: string
   amount: number
-  rawBankType: string            // Credit/Debit, Payment/Purchase, etc.
-  rawBankCategory: string        // bank's own category label
+  rawBankType: string
+  rawBankCategory: string
 }
 
 interface ReviewTxn {
@@ -37,21 +47,18 @@ interface ReviewTxn {
   date: string
   description: string
   amount: number
-  // editable
   type: 'income' | 'expense' | 'transfer'
   categoryId: string | null
   categoryName: string
   isRecurring: boolean
   recurringPeriod: string | null
-  // AI metadata (read-only display)
   confidence: number
   reasoning: string
-  // source
   accountId: string
   fileId: string
   fileName: string
-  // transfer reconciliation
   pairId?: string
+  ruleMatched?: boolean
 }
 
 // ── CSV Parsing ───────────────────────────────────────────────────────────────
@@ -66,16 +73,13 @@ function detectFormat(headers: string[]): CsvFormat | null {
 function parseDate(raw: string, format: CsvFormat): string {
   if (!raw) return ''
   if (format === 'checking') {
-    // MM/DD/YY → YYYY-MM-DD
     const [m, d, y] = raw.split('/')
     return `20${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
   }
   if (format === 'apple-card') {
-    // MM/DD/YYYY → YYYY-MM-DD
     const [m, d, y] = raw.split('/')
     return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
   }
-  // capital-one-card: already YYYY-MM-DD
   return raw
 }
 
@@ -101,7 +105,6 @@ function parseRows(rows: Record<string, string>[], format: CsvFormat): ParsedRow
         rawBankCategory: row['Category'] || '',
       }
     }
-    // apple-card
     const raw = parseFloat(row['Amount (USD)'] || row['Amount'] || '0')
     return {
       date: parseDate(row['Transaction Date'] || '', format),
@@ -118,18 +121,12 @@ function parseRows(rows: Record<string, string>[], format: CsvFormat): ParsedRow
 function detectTransferPairs(txns: ReviewTxn[]): ReviewTxn[] {
   const result = txns.map(t => ({ ...t, pairId: undefined as string | undefined }))
   const usedIds = new Set<string>()
-
   for (let i = 0; i < result.length; i++) {
-    if (usedIds.has(result[i].id)) continue
-    if (result[i].type !== 'transfer') continue
-
+    if (usedIds.has(result[i].id) || result[i].type !== 'transfer') continue
     for (let j = i + 1; j < result.length; j++) {
-      if (usedIds.has(result[j].id)) continue
-      if (result[j].type !== 'transfer') continue
+      if (usedIds.has(result[j].id) || result[j].type !== 'transfer') continue
       if (result[i].accountId === result[j].accountId) continue
-
-      const amountMatch = Math.abs(result[i].amount - result[j].amount) < 0.02
-      if (amountMatch) {
+      if (Math.abs(result[i].amount - result[j].amount) < 0.02) {
         result[i].pairId = result[j].id
         result[j].pairId = result[i].id
         usedIds.add(result[i].id)
@@ -143,6 +140,14 @@ function detectTransferPairs(txns: ReviewTxn[]): ReviewTxn[] {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
+const PERIODS = [
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'semi-monthly', label: 'Semi-monthly' },
+  { value: 'bi-weekly', label: 'Bi-weekly' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'annual', label: 'Annual' },
+]
+
 function ToastBanner({ toast, onClose }: { toast: Toast; onClose: () => void }) {
   return (
     <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium ${toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'}`}>
@@ -153,7 +158,13 @@ function ToastBanner({ toast, onClose }: { toast: Toast; onClose: () => void }) 
   )
 }
 
-function ConfidenceDot({ value }: { value: number }) {
+function ConfidenceDot({ value, ruleMatched }: { value: number; ruleMatched?: boolean }) {
+  if (ruleMatched) return (
+    <div className="flex items-center gap-1">
+      <span className="w-2 h-2 rounded-full bg-brand-500 flex-shrink-0" />
+      <span className="text-xs text-brand-600 font-medium">rule</span>
+    </div>
+  )
   const color = value >= 0.85 ? 'bg-emerald-500' : value >= 0.65 ? 'bg-amber-400' : 'bg-red-400'
   return (
     <div className="flex items-center gap-1.5">
@@ -164,20 +175,12 @@ function ConfidenceDot({ value }: { value: number }) {
 }
 
 function TypeToggle({ value, onChange }: { value: ReviewTxn['type']; onChange: (t: ReviewTxn['type']) => void }) {
-  const opts: { key: ReviewTxn['type']; label: string }[] = [
-    { key: 'income', label: 'Income' },
-    { key: 'expense', label: 'Expense' },
-    { key: 'transfer', label: 'Transfer' },
-  ]
   return (
     <div className="flex gap-0.5">
-      {opts.map(o => (
-        <button
-          key={o.key}
-          onClick={() => onChange(o.key)}
-          className={`text-xs px-2 py-1 rounded transition-colors ${value === o.key ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-400 hover:text-gray-600'}`}
-        >
-          {o.label}
+      {(['income', 'expense', 'transfer'] as const).map(t => (
+        <button key={t} onClick={() => onChange(t)}
+          className={`text-xs px-2 py-1 rounded transition-colors ${value === t ? 'bg-gray-200 text-gray-900 font-medium' : 'text-gray-400 hover:text-gray-600'}`}>
+          {t.charAt(0).toUpperCase() + t.slice(1)}
         </button>
       ))}
     </div>
@@ -196,10 +199,7 @@ export default function TransactionsPage() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [filters, setFilters] = useState<Filters>({ account: '', category: '', type: '', search: '' })
   const [showAddModal, setShowAddModal] = useState(false)
-  const [newTxn, setNewTxn] = useState({
-    date: new Date().toISOString().split('T')[0],
-    description: '', amount: '', type: 'expense', account_id: '', category_id: '', notes: ''
-  })
+  const [newTxn, setNewTxn] = useState({ date: new Date().toISOString().split('T')[0], description: '', amount: '', type: 'expense', account_id: '', category_id: '', notes: '' })
   const [aiQuestion, setAiQuestion] = useState('')
   const [aiAnswer, setAiAnswer] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
@@ -212,6 +212,17 @@ export default function TransactionsPage() {
   const [reviewFilter, setReviewFilter] = useState<'all' | 'income' | 'expense' | 'transfer'>('all')
   const [saving, setSaving] = useState(false)
   const [addingFile, setAddingFile] = useState(false)
+  const [isFullScreen, setIsFullScreen] = useState(false)
+
+  // ── Save As Rule ──────────────────────────────────────────────────────────
+  const [saveRuleFor, setSaveRuleFor] = useState<ReviewTxn | null>(null)
+  const [saveRuleForm, setSaveRuleForm] = useState({ pattern: '', transaction_type: 'expense' as 'income'|'expense'|'transfer', category_id: '', is_recurring: false, recurring_period: '' })
+  const [savingRule, setSavingRule] = useState(false)
+
+  // ── Inline Category Creation ──────────────────────────────────────────────
+  const [creatingCatFor, setCreatingCatFor] = useState<string | null>(null)
+  const [newCatName, setNewCatName] = useState('')
+  const [creatingCat, setCreatingCat] = useState(false)
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type })
@@ -235,7 +246,7 @@ export default function TransactionsPage() {
 
   useEffect(() => { load() }, [load])
 
-  // ── File Upload Handler ───────────────────────────────────────────────────
+  // ── File Handling ─────────────────────────────────────────────────────────
 
   function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -247,68 +258,29 @@ export default function TransactionsPage() {
   function processNewFile(file: File) {
     setAddingFile(true)
     Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
+      header: true, skipEmptyLines: true,
       complete: (results) => {
         const rows = results.data as Record<string, string>[]
         const headers = results.meta.fields || []
         const format = detectFormat(headers)
-
-        if (!format) {
-          showToast('Unrecognized CSV format — check it is from Capital One or Apple Card', 'error')
-          setAddingFile(false)
-          return
-        }
-
+        if (!format) { showToast('Unrecognized CSV format', 'error'); setAddingFile(false); return }
         const parsed = parseRows(rows, format)
-        if (parsed.length === 0) {
-          showToast('No valid transactions found in this file', 'error')
-          setAddingFile(false)
-          return
-        }
-
-        // For capital-one-card, detect which card numbers appear
-        const detectedCards = format === 'capital-one-card'
-          ? [...new Set(rows.map(r => r['Card No.'] || '').filter(Boolean))]
-          : []
-
-        // Suggest an account based on format + card numbers
+        if (parsed.length === 0) { showToast('No valid transactions found', 'error'); setAddingFile(false); return }
+        const detectedCards = format === 'capital-one-card' ? [...new Set(rows.map(r => r['Card No.'] || '').filter(Boolean))] : []
         const suggestedAccount = suggestAccount(format, detectedCards)
-
-        const newFile: PendingFile = {
-          fileId: crypto.randomUUID(),
-          fileName: file.name,
-          format,
-          detectedCards,
-          accountId: suggestedAccount,
-          parsedRows: parsed,
-        }
-
-        setPendingFiles(prev => [...prev, newFile])
+        setPendingFiles(prev => [...prev, { fileId: crypto.randomUUID(), fileName: file.name, format, detectedCards, accountId: suggestedAccount, parsedRows: parsed }])
         setImportStep('select')
         setAddingFile(false)
       },
-      error: () => {
-        showToast('Could not read file — make sure it is a CSV', 'error')
-        setAddingFile(false)
-      }
+      error: () => { showToast('Could not read file', 'error'); setAddingFile(false) }
     })
   }
 
   function suggestAccount(format: CsvFormat, detectedCards: string[]): string {
-    if (format === 'apple-card') {
-      return accounts.find(a => a.name?.toLowerCase().includes('apple'))?.id || ''
-    }
-    if (format === 'checking') {
-      return accounts.find(a => a.type === 'checking' || a.name?.toLowerCase().includes('checking') || a.name?.toLowerCase().includes('5398'))?.id || ''
-    }
-    // capital-one-card — try to match by card number
-    if (detectedCards.includes('0017')) {
-      return accounts.find(a => a.name?.toLowerCase().includes('savor') || a.name?.toLowerCase().includes('0017'))?.id || ''
-    }
-    if (detectedCards.some(c => ['9043', '1555'].includes(c))) {
-      return accounts.find(a => a.name?.toLowerCase().includes('quicksilver') || a.name?.toLowerCase().includes('quick'))?.id || ''
-    }
+    if (format === 'apple-card') return accounts.find(a => a.name?.toLowerCase().includes('apple'))?.id || ''
+    if (format === 'checking') return accounts.find(a => a.type === 'checking' || a.name?.toLowerCase().includes('checking') || a.name?.toLowerCase().includes('5398'))?.id || ''
+    if (detectedCards.includes('0017')) return accounts.find(a => a.name?.toLowerCase().includes('savor'))?.id || ''
+    if (detectedCards.some(c => ['9043', '1555'].includes(c))) return accounts.find(a => a.name?.toLowerCase().includes('quicksilver') || a.name?.toLowerCase().includes('quick'))?.id || ''
     return accounts.find(a => a.type === 'credit')?.id || ''
   }
 
@@ -317,98 +289,112 @@ export default function TransactionsPage() {
   }
 
   function removeFile(fileId: string) {
-    setPendingFiles(prev => {
-      const next = prev.filter(f => f.fileId !== fileId)
-      if (next.length === 0) setImportStep('idle')
-      return next
-    })
+    setPendingFiles(prev => { const next = prev.filter(f => f.fileId !== fileId); if (next.length === 0) setImportStep('idle'); return next })
   }
 
-  // ── AI Classification ─────────────────────────────────────────────────────
+  // ── AI Classification with Rules Engine ───────────────────────────────────
 
   async function runClassification() {
-    if (pendingFiles.some(f => !f.accountId)) {
-      showToast('Please map every file to an account before analyzing', 'error')
-      return
-    }
-
+    if (pendingFiles.some(f => !f.accountId)) { showToast('Please map every file to an account', 'error'); return }
     setImportStep('classifying')
+
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    // Fetch rules
+    const { data: rulesData } = await supabase.from('category_rules').select('*, category:categories(name)').eq('user_id', user.id)
+    const rules: AppRule[] = (rulesData || []).map((r: any) => ({ ...r, category_name: r.category?.name || null }))
+
     const categoryNames = categories.map(c => c.name)
     const catNameToId: Record<string, string> = {}
     categories.forEach(c => { catNameToId[c.name.toLowerCase()] = c.id })
 
-    // Build flat list of transactions to classify
+    // Build transaction list
     const toClassify: { id: string; description: string; amount: number; rawBankType: string; rawBankCategory: string; csvFormat: string }[] = []
-    const idToFileMeta: Record<string, { fileId: string; fileName: string; accountId: string; row: ParsedRow }> = {}
+    const idToMeta: Record<string, { fileId: string; fileName: string; accountId: string; row: ParsedRow }> = {}
 
     pendingFiles.forEach(pf => {
       pf.parsedRows.forEach(row => {
         const id = crypto.randomUUID()
-        toClassify.push({
-          id,
-          description: row.description,
-          amount: row.amount,
-          rawBankType: row.rawBankType,
-          rawBankCategory: row.rawBankCategory,
-          csvFormat: pf.format,
-        })
-        idToFileMeta[id] = { fileId: pf.fileId, fileName: pf.fileName, accountId: pf.accountId, row }
+        toClassify.push({ id, description: row.description, amount: row.amount, rawBankType: row.rawBankType, rawBankCategory: row.rawBankCategory, csvFormat: pf.format })
+        idToMeta[id] = { fileId: pf.fileId, fileName: pf.fileName, accountId: pf.accountId, row }
       })
     })
 
-    setClassifyProgress(`Classifying ${toClassify.length} transactions...`)
+    setClassifyProgress(`Applying ${rules.length} rules to ${toClassify.length} transactions...`)
 
-    try {
-      const res = await fetch('/api/classify-transaction', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transactions: toClassify, categories: categoryNames }),
-      })
-      const { classified, error } = await res.json()
-
-      if (error || !classified) {
-        showToast('AI classification failed — you can still review and edit manually', 'error')
-      }
-
-      const classifiedMap: Record<string, any> = {}
-      ;(classified || []).forEach((c: any) => { classifiedMap[c.id] = c })
-
-      const reviewRows: ReviewTxn[] = toClassify.map(t => {
-        const ai = classifiedMap[t.id] || {}
-        const meta = idToFileMeta[t.id]
-        const catName = ai.category || ''
-        const catId = catNameToId[catName.toLowerCase()] || null
-
-        return {
+    // Apply rules first (exact contains match, case insensitive)
+    const ruleMatched: Record<string, ReviewTxn> = {}
+    const toClassifyAI = toClassify.filter(t => {
+      const match = rules.find(r => t.description.toLowerCase().includes(r.pattern.toLowerCase()))
+      if (match) {
+        const meta = idToMeta[t.id]
+        ruleMatched[t.id] = {
           id: t.id,
           date: meta.row.date,
           description: t.description,
           amount: t.amount,
-          type: ai.type || 'expense',
-          categoryId: catId,
-          categoryName: catName,
-          isRecurring: ai.isRecurring || false,
-          recurringPeriod: ai.recurringPeriod || null,
-          confidence: ai.confidence ?? 0.5,
-          reasoning: ai.reasoning || '',
+          type: match.transaction_type || 'expense',
+          categoryId: match.category_id || null,
+          categoryName: match.category_name || '',
+          isRecurring: match.is_recurring || false,
+          recurringPeriod: match.recurring_period || null,
+          confidence: 1.0,
+          reasoning: `Rule: "${match.pattern}"`,
           accountId: meta.accountId,
           fileId: meta.fileId,
           fileName: meta.fileName,
+          ruleMatched: true,
         }
-      })
+        return false
+      }
+      return true
+    })
 
-      // Detect transfer pairs across accounts
-      const withPairs = detectTransferPairs(reviewRows)
+    const ruleCount = toClassify.length - toClassifyAI.length
+    setClassifyProgress(`${ruleCount} matched rules · AI classifying ${toClassifyAI.length} remaining...`)
 
-      setReviewTxns(withPairs)
-      setImportStep('review')
-      setClassifyProgress('')
-    } catch (err) {
-      console.error(err)
-      showToast('Classification request failed', 'error')
-      setImportStep('select')
-      setClassifyProgress('')
+    // AI for the rest
+    const classifiedMap: Record<string, any> = {}
+    if (toClassifyAI.length > 0) {
+      try {
+        const res = await fetch('/api/classify-transaction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transactions: toClassifyAI, categories: categoryNames }),
+        })
+        const { classified } = await res.json()
+        ;(classified || []).forEach((c: any) => { classifiedMap[c.id] = c })
+      } catch (err) { console.error(err) }
     }
+
+    // Merge results
+    const reviewRows: ReviewTxn[] = toClassify.map(t => {
+      if (ruleMatched[t.id]) return ruleMatched[t.id]
+      const ai = classifiedMap[t.id] || {}
+      const meta = idToMeta[t.id]
+      const catName = ai.category || ''
+      return {
+        id: t.id,
+        date: meta.row.date,
+        description: t.description,
+        amount: t.amount,
+        type: ai.type || 'expense',
+        categoryId: catNameToId[catName.toLowerCase()] || null,
+        categoryName: catName,
+        isRecurring: ai.isRecurring || false,
+        recurringPeriod: ai.recurringPeriod || null,
+        confidence: ai.confidence ?? 0.5,
+        reasoning: ai.reasoning || '',
+        accountId: meta.accountId,
+        fileId: meta.fileId,
+        fileName: meta.fileName,
+      }
+    })
+
+    setReviewTxns(detectTransferPairs(reviewRows))
+    setImportStep('review')
+    setClassifyProgress('')
   }
 
   // ── Review Editing ────────────────────────────────────────────────────────
@@ -418,61 +404,86 @@ export default function TransactionsPage() {
       const updated = prev.map(t => {
         if (t.id !== id) return t
         const next = { ...t, ...patch }
-        // If type changed, clear category if switching to/from transfer
-        if (patch.type && patch.type !== t.type) {
-          if (patch.type === 'transfer') next.categoryId = null
-        }
+        if (patch.type && patch.type === 'transfer') next.categoryId = null
         return next
       })
-      // Re-run pair detection if types changed
       if ('type' in patch) return detectTransferPairs(updated)
       return updated
     })
   }
 
-  // ── Import to DB ─────────────────────────────────────────────────────────
+  // ── Save As Rule ──────────────────────────────────────────────────────────
+
+  function openSaveRule(t: ReviewTxn) {
+    const words = t.description.trim().split(/\s+/)
+    const pattern = words.slice(0, Math.min(3, words.length)).join(' ')
+    setSaveRuleForm({ pattern, transaction_type: t.type, category_id: t.categoryId || '', is_recurring: t.isRecurring, recurring_period: t.recurringPeriod || '' })
+    setSaveRuleFor(t)
+  }
+
+  async function saveAsRule() {
+    if (!saveRuleForm.pattern.trim()) return
+    setSavingRule(true)
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) { setSavingRule(false); return }
+    const { error } = await supabase.from('category_rules').insert({
+      user_id: user.id,
+      pattern: saveRuleForm.pattern.trim(),
+      category_id: saveRuleForm.transaction_type === 'transfer' ? null : saveRuleForm.category_id || null,
+      transaction_type: saveRuleForm.transaction_type,
+      is_recurring: saveRuleForm.is_recurring,
+      recurring_period: saveRuleForm.is_recurring && saveRuleForm.recurring_period ? saveRuleForm.recurring_period : null,
+    })
+    if (error) { showToast('Failed to save rule', 'error') }
+    else { showToast(`Rule saved — "${saveRuleForm.pattern}" will auto-classify on future imports`); setSaveRuleFor(null) }
+    setSavingRule(false)
+  }
+
+  // ── Inline Category Creation ──────────────────────────────────────────────
+
+  async function createCategoryInline(txnId: string) {
+    if (!newCatName.trim()) return
+    setCreatingCat(true)
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) { setCreatingCat(false); return }
+    const { data, error } = await supabase.from('categories').insert({
+      user_id: user.id, name: newCatName.trim(), color: '#378ADD', is_income: false,
+    }).select().single()
+    if (error) { showToast('Failed to create category', 'error') }
+    else {
+      setCategories(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)))
+      updateReviewTxn(txnId, { categoryId: data.id, categoryName: data.name })
+      setCreatingCatFor(null)
+      setNewCatName('')
+      showToast(`Category "${data.name}" created`)
+    }
+    setCreatingCat(false)
+  }
+
+  // ── Confirm Import ────────────────────────────────────────────────────────
 
   async function confirmImport() {
     setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // Fetch existing transactions to check for duplicates
-    const { data: existing } = await supabase
-      .from('transactions')
-      .select('date, description, amount')
-      .eq('user_id', user.id)
-
-    const existingSet = new Set(
-      (existing || []).map((t: any) => `${t.date}|${t.description}|${t.amount}`)
-    )
+    const { data: existing } = await supabase.from('transactions').select('date, description, amount').eq('user_id', user.id)
+    const existingSet = new Set((existing || []).map((t: any) => `${t.date}|${t.description}|${t.amount}`))
 
     const toInsert = reviewTxns
       .filter(t => !existingSet.has(`${t.date}|${t.description}|${t.amount}`))
       .map(t => ({
-        user_id: user.id,
-        date: t.date,
-        description: t.description,
-        amount: t.amount,
-        type: t.type,
-        account_id: t.accountId || null,
-        category_id: t.categoryId || null,
-        is_recurring: t.isRecurring,
-        recurring_period: t.recurringPeriod || null,
+        user_id: user.id, date: t.date, description: t.description, amount: t.amount,
+        type: t.type, account_id: t.accountId || null, category_id: t.categoryId || null,
+        is_recurring: t.isRecurring, recurring_period: t.recurringPeriod || null,
       }))
 
     const skipped = reviewTxns.length - toInsert.length
-
-    if (toInsert.length === 0) {
-      showToast('All transactions already exist — nothing imported', 'error')
-      setSaving(false)
-      return
-    }
+    if (toInsert.length === 0) { showToast('All transactions already exist — nothing imported', 'error'); setSaving(false); return }
 
     const { error } = await supabase.from('transactions').insert(toInsert)
-    if (error) {
-      showToast(`Import failed: ${error.message}`, 'error')
-    } else {
+    if (error) { showToast(`Import failed: ${error.message}`, 'error') }
+    else {
       showToast(`Imported ${toInsert.length} transactions${skipped > 0 ? ` · ${skipped} duplicates skipped` : ''}`)
       resetImport()
       load()
@@ -481,11 +492,8 @@ export default function TransactionsPage() {
   }
 
   function resetImport() {
-    setImportStep('idle')
-    setPendingFiles([])
-    setReviewTxns([])
-    setReviewFilter('all')
-    setClassifyProgress('')
+    setImportStep('idle'); setPendingFiles([]); setReviewTxns([])
+    setReviewFilter('all'); setClassifyProgress(''); setIsFullScreen(false)
   }
 
   // ── Add Transaction ───────────────────────────────────────────────────────
@@ -520,21 +528,16 @@ export default function TransactionsPage() {
 
   async function askAI() {
     if (!aiQuestion.trim()) return
-    setAiLoading(true)
-    setAiAnswer('')
+    setAiLoading(true); setAiAnswer('')
     try {
-      const response = await fetch('/api/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: aiQuestion, transactions, categories }),
-      })
-      const { answer } = await response.json()
+      const res = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: aiQuestion, transactions, categories }) })
+      const { answer } = await res.json()
       setAiAnswer(answer)
     } catch { setAiAnswer('Sorry, could not process that question.') }
     setAiLoading(false)
   }
 
-  // ── Derived Data ──────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
 
   const filtered = transactions.filter(t => {
     if (filters.account && t.account_id !== filters.account) return false
@@ -546,16 +549,17 @@ export default function TransactionsPage() {
 
   const reviewVisible = reviewFilter === 'all' ? reviewTxns : reviewTxns.filter(t => t.type === reviewFilter)
   const reviewPairIds = new Set(reviewTxns.filter(t => t.pairId).flatMap(t => [t.id, t.pairId!]))
-  const lowConfCount = reviewTxns.filter(t => t.confidence < 0.65).length
+  const lowConfCount = reviewTxns.filter(t => t.confidence < 0.65 && !t.ruleMatched).length
   const pairCount = reviewTxns.filter(t => t.pairId).length / 2
+  const ruleMatchCount = reviewTxns.filter(t => t.ruleMatched).length
 
   const reviewIncome = reviewTxns.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0)
   const reviewExpense = reviewTxns.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0)
   const reviewTransfer = reviewTxns.filter(t => t.type === 'transfer').reduce((s, t) => s + t.amount, 0)
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
   const isModalOpen = importStep !== 'idle'
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-6">
@@ -566,7 +570,7 @@ export default function TransactionsPage() {
           <p className="text-sm text-gray-500 mt-0.5">{filtered.length} transactions{(filters.search || filters.account || filters.category || filters.type) ? ' (filtered)' : ''}</p>
         </div>
         <div className="flex gap-2">
-          <button className="btn-secondary" onClick={() => { setImportStep('select') }}><Upload className="w-4 h-4" />Import CSV</button>
+          <button className="btn-secondary" onClick={() => setImportStep('select')}><Upload className="w-4 h-4" />Import CSV</button>
           <button className="btn-primary" onClick={() => setShowAddModal(true)}><Plus className="w-4 h-4" />Add</button>
         </div>
       </div>
@@ -576,19 +580,12 @@ export default function TransactionsPage() {
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Sparkles className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-500" />
-            <input
-              className="input pl-9"
-              placeholder='Ask anything — "how much did I spend on dining?" or "what are my recurring subscriptions?"'
-              value={aiQuestion}
-              onChange={e => setAiQuestion(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') askAI() }}
-            />
+            <input className="input pl-9" placeholder='Ask anything — "how much did I spend on dining?" or "what are my recurring subscriptions?"'
+              value={aiQuestion} onChange={e => setAiQuestion(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') askAI() }} />
           </div>
           <button className="btn-primary" onClick={askAI} disabled={aiLoading}>{aiLoading ? 'Thinking...' : 'Ask'}</button>
         </div>
-        {aiAnswer && (
-          <div className="mt-3 p-3 bg-brand-50 border border-brand-100 rounded-lg text-sm text-gray-700 leading-relaxed">{aiAnswer}</div>
-        )}
+        {aiAnswer && <div className="mt-3 p-3 bg-brand-50 border border-brand-100 rounded-lg text-sm text-gray-700 leading-relaxed">{aiAnswer}</div>}
       </div>
 
       {/* Filters */}
@@ -667,52 +664,48 @@ export default function TransactionsPage() {
             </table>
             <div className="px-4 py-3 bg-gray-50 border-t border-gray-100 flex justify-between items-center text-sm">
               <span className="text-gray-400">{filtered.length} transactions shown</span>
-              <span className="font-semibold text-gray-700">
-                Net: <span className={filtered.reduce((s, t) => t.type === 'income' ? s + t.amount : s - t.amount, 0) >= 0 ? 'text-emerald-600' : 'text-red-500'}>
-                  {formatCurrency(Math.abs(filtered.reduce((s, t) => t.type === 'income' ? s + t.amount : s - t.amount, 0)))}
-                </span>
-              </span>
+              <span className="font-semibold text-gray-700">Net: <span className={filtered.reduce((s, t) => t.type === 'income' ? s + t.amount : s - t.amount, 0) >= 0 ? 'text-emerald-600' : 'text-red-500'}>{formatCurrency(Math.abs(filtered.reduce((s, t) => t.type === 'income' ? s + t.amount : s - t.amount, 0)))}</span></span>
             </div>
           </>
         )}
       </div>
 
-      {/* ── Import Modal ─────────────────────────────────────────────────── */}
+      {/* ── Import Modal ──────────────────────────────────────────────────── */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/40 z-50 flex items-start justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl my-8">
+        <div className={`fixed inset-0 bg-black/40 z-50 ${isFullScreen ? '' : 'flex items-start justify-center p-4 overflow-y-auto'}`}>
+          <div className={`bg-white shadow-xl w-full ${isFullScreen ? 'h-full overflow-y-auto' : 'rounded-2xl max-w-5xl my-8'}`}>
 
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 sticky top-0 bg-white z-10">
               <div className="flex items-center gap-3">
                 <h2 className="font-semibold text-gray-900 text-lg">Import Transactions</h2>
-                {/* Step indicator */}
                 <div className="hidden sm:flex items-center gap-1 text-xs text-gray-400">
                   {['Select files', 'Analyze', 'Review & confirm'].map((step, i) => {
                     const stepKeys: ImportStep[] = ['select', 'classifying', 'review']
                     const idx = stepKeys.indexOf(importStep)
-                    const done = i < idx
-                    const active = i === idx
+                    const done = i < idx; const active = i === idx
                     return (
                       <span key={step} className="flex items-center gap-1">
                         {i > 0 && <span className="text-gray-200">›</span>}
-                        <span className={`${active ? 'text-gray-800 font-medium' : done ? 'text-emerald-600' : 'text-gray-300'}`}>
-                          {done ? '✓ ' : ''}{step}
-                        </span>
+                        <span className={active ? 'text-gray-800 font-medium' : done ? 'text-emerald-600' : 'text-gray-300'}>{done ? '✓ ' : ''}{step}</span>
                       </span>
                     )
                   })}
                 </div>
               </div>
-              {importStep !== 'classifying' && !saving && (
-                <button onClick={resetImport} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
-              )}
+              <div className="flex items-center gap-2">
+                <button onClick={() => setIsFullScreen(f => !f)} className="text-gray-400 hover:text-gray-600">
+                  {isFullScreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                </button>
+                {importStep !== 'classifying' && !saving && (
+                  <button onClick={resetImport} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+                )}
+              </div>
             </div>
 
-            {/* ── Step: Select files ─────────────────────────────────────── */}
-            {(importStep === 'select') && (
+            {/* Step: Select */}
+            {importStep === 'select' && (
               <div className="p-6 space-y-5">
-                {/* Uploaded files list */}
                 {pendingFiles.length > 0 && (
                   <div className="space-y-3">
                     {pendingFiles.map(pf => (
@@ -725,11 +718,7 @@ export default function TransactionsPage() {
                             {' · '}{pf.parsedRows.length} transactions
                           </p>
                         </div>
-                        <select
-                          className="input text-sm w-52 flex-shrink-0"
-                          value={pf.accountId}
-                          onChange={e => updateFileAccount(pf.fileId, e.target.value)}
-                        >
+                        <select className="input text-sm w-52 flex-shrink-0" value={pf.accountId} onChange={e => updateFileAccount(pf.fileId, e.target.value)}>
                           <option value="">Select account...</option>
                           {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                         </select>
@@ -738,19 +727,12 @@ export default function TransactionsPage() {
                     ))}
                   </div>
                 )}
-
-                {/* Drop zone */}
-                <div
-                  className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center hover:border-gray-300 transition-colors cursor-pointer"
+                <div className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center hover:border-gray-300 transition-colors cursor-pointer"
                   onClick={() => fileInputRef.current?.click()}
                   onDragOver={e => e.preventDefault()}
-                  onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) processNewFile(f) }}
-                >
+                  onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) processNewFile(f) }}>
                   {addingFile ? (
-                    <div className="flex flex-col items-center gap-2">
-                      <RefreshCw className="w-6 h-6 text-gray-400 animate-spin" />
-                      <p className="text-sm text-gray-500">Reading file...</p>
-                    </div>
+                    <div className="flex flex-col items-center gap-2"><RefreshCw className="w-6 h-6 text-gray-400 animate-spin" /><p className="text-sm text-gray-500">Reading file...</p></div>
                   ) : (
                     <div className="flex flex-col items-center gap-2">
                       <Upload className="w-6 h-6 text-gray-300" />
@@ -760,63 +742,50 @@ export default function TransactionsPage() {
                   )}
                 </div>
                 <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleFileInput} />
-
-                {/* Format guide */}
                 <div className="grid grid-cols-2 gap-3 text-xs text-gray-500">
-                  <div className="p-3 bg-gray-50 rounded-lg">
-                    <p className="font-medium text-gray-600 mb-1">Capital One Checking / Cards</p>
-                    <p>Account → Transactions → Download → CSV</p>
-                  </div>
-                  <div className="p-3 bg-gray-50 rounded-lg">
-                    <p className="font-medium text-gray-600 mb-1">Apple Card</p>
-                    <p>Wallet app → Apple Card → tap month → Export Transactions</p>
-                  </div>
+                  <div className="p-3 bg-gray-50 rounded-lg"><p className="font-medium text-gray-600 mb-1">Capital One Checking / Cards</p><p>Account → Transactions → Download → CSV</p></div>
+                  <div className="p-3 bg-gray-50 rounded-lg"><p className="font-medium text-gray-600 mb-1">Apple Card</p><p>Wallet app → Apple Card → tap month → Export Transactions</p></div>
                 </div>
-
                 {pendingFiles.length > 0 && (
                   <div className="flex justify-between items-center pt-2">
-                    <p className="text-sm text-gray-500">
-                      {pendingFiles.reduce((s, f) => s + f.parsedRows.length, 0)} total transactions across {pendingFiles.length} file{pendingFiles.length > 1 ? 's' : ''}
-                    </p>
-                    <button
-                      className="btn-primary"
-                      onClick={runClassification}
-                      disabled={pendingFiles.some(f => !f.accountId)}
-                    >
-                      <Sparkles className="w-4 h-4" />
-                      Analyze with AI
+                    <p className="text-sm text-gray-500">{pendingFiles.reduce((s, f) => s + f.parsedRows.length, 0)} total transactions across {pendingFiles.length} file{pendingFiles.length > 1 ? 's' : ''}</p>
+                    <button className="btn-primary" onClick={runClassification} disabled={pendingFiles.some(f => !f.accountId)}>
+                      <Sparkles className="w-4 h-4" />Analyze with AI
                     </button>
                   </div>
                 )}
               </div>
             )}
 
-            {/* ── Step: Classifying ──────────────────────────────────────── */}
+            {/* Step: Classifying */}
             {importStep === 'classifying' && (
               <div className="p-12 text-center">
                 <Sparkles className="w-10 h-10 text-brand-500 mx-auto mb-4 animate-pulse" />
-                <p className="font-medium text-gray-800 mb-2">AI is analyzing your transactions</p>
+                <p className="font-medium text-gray-800 mb-2">Analyzing your transactions</p>
                 <p className="text-sm text-gray-500">{classifyProgress}</p>
-                <p className="text-xs text-gray-400 mt-2">Classifying type, category, and recurring status for each transaction...</p>
               </div>
             )}
 
-            {/* ── Step: Review ───────────────────────────────────────────── */}
+            {/* Step: Review */}
             {importStep === 'review' && (
               <div className="flex flex-col">
-
-                {/* Alerts */}
                 <div className="px-6 pt-4 space-y-2">
+                  {ruleMatchCount > 0 && (
+                    <div className="flex items-center gap-2 p-3 bg-brand-50 border border-brand-100 rounded-lg text-sm text-brand-700">
+                      <span className="font-medium">{ruleMatchCount} transactions matched your rules</span>
+                      <span className="text-brand-500">— applied automatically at 100% confidence.</span>
+                    </div>
+                  )}
                   {pairCount > 0 && (
                     <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
                       <span className="font-medium">⇄ {pairCount} transfer pair{pairCount > 1 ? 's' : ''} detected</span>
-                      <span className="text-amber-600">— credit card payments matched between accounts. Both sides are marked as transfer and excluded from totals.</span>
+                      <span className="text-amber-600">— credit card payments matched and excluded from totals.</span>
                     </div>
                   )}
                   {lowConfCount > 0 && (
                     <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">
                       <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                      <span><strong>{lowConfCount} transactions</strong> had low AI confidence — flagged for your review.</span>
+                      <span><strong>{lowConfCount} transactions</strong> had low AI confidence — review carefully.</span>
                     </div>
                   )}
                 </div>
@@ -824,15 +793,10 @@ export default function TransactionsPage() {
                 {/* Filter tabs */}
                 <div className="flex items-center gap-1 px-6 pt-3 pb-2">
                   {(['all', 'income', 'expense', 'transfer'] as const).map(f => (
-                    <button
-                      key={f}
-                      onClick={() => setReviewFilter(f)}
-                      className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${reviewFilter === f ? 'bg-gray-100 text-gray-800 font-medium' : 'text-gray-400 hover:text-gray-600'}`}
-                    >
+                    <button key={f} onClick={() => setReviewFilter(f)}
+                      className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${reviewFilter === f ? 'bg-gray-100 text-gray-800 font-medium' : 'text-gray-400 hover:text-gray-600'}`}>
                       {f.charAt(0).toUpperCase() + f.slice(1)}
-                      <span className="ml-1 text-gray-400 font-normal">
-                        {f === 'all' ? reviewTxns.length : reviewTxns.filter(t => t.type === f).length}
-                      </span>
+                      <span className="ml-1 text-gray-400 font-normal">{f === 'all' ? reviewTxns.length : reviewTxns.filter(t => t.type === f).length}</span>
                     </button>
                   ))}
                   <span className="flex-1" />
@@ -840,75 +804,86 @@ export default function TransactionsPage() {
                 </div>
 
                 {/* Review table */}
-                <div className="overflow-x-auto border-y border-gray-100 max-h-[50vh] overflow-y-auto">
-                  <table className="w-full text-sm min-w-[820px]">
+                <div className="overflow-x-auto border-y border-gray-100 overflow-y-auto" style={{ maxHeight: isFullScreen ? 'calc(100vh - 300px)' : '55vh' }}>
+                  <table className="w-full text-sm min-w-[900px]">
                     <thead className="sticky top-0 bg-gray-50 border-b border-gray-100 z-10">
                       <tr>
                         <th className="text-left px-4 py-2.5 font-medium text-gray-500 text-xs w-20">Date</th>
                         <th className="text-left px-4 py-2.5 font-medium text-gray-500 text-xs">Description</th>
                         <th className="text-right px-4 py-2.5 font-medium text-gray-500 text-xs w-24">Amount</th>
                         <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-52">Type</th>
-                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-36">Category</th>
-                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-20 text-center">Recurring</th>
-                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-20">Confidence</th>
+                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-44">Category</th>
+                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-36 text-center">Recurring</th>
+                        <th className="px-4 py-2.5 font-medium text-gray-500 text-xs w-24">Confidence</th>
                       </tr>
                     </thead>
                     <tbody>
                       {reviewVisible.map(t => {
                         const isPaired = !!t.pairId
-                        const isLow = t.confidence < 0.65
-                        const rowClass = isPaired ? 'bg-amber-50/50' : isLow ? 'bg-red-50/50' : ''
-
+                        const isLow = t.confidence < 0.65 && !t.ruleMatched
+                        const rowClass = t.ruleMatched ? 'bg-brand-50/30' : isPaired ? 'bg-amber-50/50' : isLow ? 'bg-red-50/50' : ''
                         return (
                           <tr key={t.id} className={`border-b border-gray-50 ${rowClass}`}>
                             <td className="px-4 py-2 text-xs text-gray-400 whitespace-nowrap">{t.date}</td>
-                            <td className="px-4 py-2 max-w-[220px]">
-                              <p className="text-gray-800 text-xs font-medium truncate">{t.description}</p>
-                              <div className="flex items-center gap-1 mt-0.5">
+                            <td className="px-4 py-2">
+                              <p className="text-gray-800 text-xs font-medium" title={t.description} style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</p>
+                              <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                                 <span className="text-[10px] text-gray-400">{accounts.find(a => a.id === t.accountId)?.name || t.fileName}</span>
                                 {isPaired && <span className="text-[10px] text-amber-600 bg-amber-100 rounded px-1">⇄ paired</span>}
                                 {isLow && <span className="text-[10px] text-red-500 bg-red-50 rounded px-1">review</span>}
+                                <button onClick={() => openSaveRule(t)} className="text-[10px] text-brand-500 hover:text-brand-700 flex items-center gap-0.5 ml-1">
+                                  <BookmarkPlus className="w-2.5 h-2.5" />save rule
+                                </button>
                               </div>
                             </td>
                             <td className={`px-4 py-2 text-right text-xs font-semibold tabular-nums ${t.type === 'income' ? 'text-emerald-600' : t.type === 'transfer' ? 'text-gray-400' : 'text-gray-700'}`}>
                               {t.type === 'income' ? '+' : t.type === 'transfer' ? '⇄ ' : ''}{formatCurrency(t.amount)}
                             </td>
-                            <td className="px-4 py-2">
-                              <TypeToggle value={t.type} onChange={type => updateReviewTxn(t.id, { type })} />
-                            </td>
+                            <td className="px-4 py-2"><TypeToggle value={t.type} onChange={type => updateReviewTxn(t.id, { type })} /></td>
                             <td className="px-4 py-2">
                               {t.type !== 'transfer' ? (
-                                <select
-                                  className="text-xs border border-gray-200 rounded-lg px-2 py-1 w-full bg-white focus:outline-none focus:ring-1 focus:ring-brand-300"
-                                  value={t.categoryId || ''}
-                                  onChange={e => {
-                                    const cat = categories.find(c => c.id === e.target.value)
-                                    updateReviewTxn(t.id, { categoryId: e.target.value || null, categoryName: cat?.name || '' })
-                                  }}
-                                >
-                                  <option value="">Uncategorized</option>
-                                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                </select>
-                              ) : (
-                                <span className="text-xs text-gray-300">—</span>
-                              )}
+                                <div className="space-y-1">
+                                  {creatingCatFor === t.id ? (
+                                    <div className="flex gap-1">
+                                      <input className="text-xs border border-gray-200 rounded px-2 py-1 flex-1 min-w-0" placeholder="Category name"
+                                        value={newCatName} onChange={e => setNewCatName(e.target.value)} autoFocus
+                                        onKeyDown={e => { if (e.key === 'Enter') createCategoryInline(t.id); if (e.key === 'Escape') setCreatingCatFor(null) }} />
+                                      <button onClick={() => createCategoryInline(t.id)} disabled={creatingCat} className="text-xs text-brand-600 font-medium px-1 flex-shrink-0">
+                                        {creatingCat ? '...' : 'Save'}
+                                      </button>
+                                      <button onClick={() => { setCreatingCatFor(null); setNewCatName('') }} className="text-xs text-gray-400 px-1 flex-shrink-0">✕</button>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-1">
+                                      <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 flex-1 min-w-0 bg-white focus:outline-none focus:ring-1 focus:ring-brand-300"
+                                        value={t.categoryId || ''}
+                                        onChange={e => { const cat = categories.find(c => c.id === e.target.value); updateReviewTxn(t.id, { categoryId: e.target.value || null, categoryName: cat?.name || '' }) }}>
+                                        <option value="">Uncategorized</option>
+                                        {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                      </select>
+                                      <button onClick={() => { setCreatingCatFor(t.id); setNewCatName('') }} className="text-gray-400 hover:text-brand-500 flex-shrink-0" title="Create new category">
+                                        <Plus className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : <span className="text-xs text-gray-300">—</span>}
                             </td>
                             <td className="px-4 py-2 text-center">
-                              <input
-                                type="checkbox"
-                                checked={t.isRecurring}
-                                onChange={e => updateReviewTxn(t.id, { isRecurring: e.target.checked })}
-                                className="rounded border-gray-300 text-brand-500 focus:ring-brand-400"
-                              />
-                              {t.isRecurring && t.recurringPeriod && (
-                                <p className="text-[10px] text-gray-400 mt-0.5">{t.recurringPeriod}</p>
+                              <input type="checkbox" checked={t.isRecurring} onChange={e => updateReviewTxn(t.id, { isRecurring: e.target.checked })}
+                                className="rounded border-gray-300 text-brand-500 focus:ring-brand-400" />
+                              {t.isRecurring && (
+                                <select className="text-xs border border-gray-200 rounded px-1 py-0.5 mt-1 w-full block mx-auto"
+                                  value={t.recurringPeriod || ''}
+                                  onChange={e => updateReviewTxn(t.id, { recurringPeriod: e.target.value || null })}>
+                                  <option value="">Period...</option>
+                                  {PERIODS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                                </select>
                               )}
                             </td>
                             <td className="px-4 py-2">
-                              <ConfidenceDot value={t.confidence} />
-                              {t.reasoning && (
-                                <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">{t.reasoning}</p>
-                              )}
+                              <ConfidenceDot value={t.confidence} ruleMatched={t.ruleMatched} />
+                              {t.reasoning && <p className="text-[10px] text-gray-400 mt-0.5 leading-tight">{t.reasoning}</p>}
                             </td>
                           </tr>
                         )
@@ -921,40 +896,72 @@ export default function TransactionsPage() {
                 <div className="px-6 py-4 border-t border-gray-100 bg-gray-50">
                   <div className="flex items-center justify-between flex-wrap gap-4">
                     <div className="flex items-center gap-6 text-sm">
-                      <div>
-                        <span className="text-gray-400 text-xs">Income</span>
-                        <p className="font-semibold text-emerald-600">+{formatCurrency(reviewIncome)}</p>
-                      </div>
-                      <div>
-                        <span className="text-gray-400 text-xs">Expenses</span>
-                        <p className="font-semibold text-gray-800">-{formatCurrency(reviewExpense)}</p>
-                      </div>
-                      <div>
-                        <span className="text-gray-400 text-xs">Transfers (excluded)</span>
-                        <p className="font-semibold text-gray-400">{formatCurrency(reviewTransfer)}</p>
-                      </div>
-                      <div>
-                        <span className="text-gray-400 text-xs">Net</span>
-                        <p className={`font-semibold ${reviewIncome - reviewExpense >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                          {formatCurrency(Math.abs(reviewIncome - reviewExpense))}
-                        </p>
-                      </div>
+                      <div><span className="text-gray-400 text-xs">Income</span><p className="font-semibold text-emerald-600">+{formatCurrency(reviewIncome)}</p></div>
+                      <div><span className="text-gray-400 text-xs">Expenses</span><p className="font-semibold text-gray-800">-{formatCurrency(reviewExpense)}</p></div>
+                      <div><span className="text-gray-400 text-xs">Transfers (excluded)</span><p className="font-semibold text-gray-400">{formatCurrency(reviewTransfer)}</p></div>
+                      <div><span className="text-gray-400 text-xs">Net</span><p className={`font-semibold ${reviewIncome - reviewExpense >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{formatCurrency(Math.abs(reviewIncome - reviewExpense))}</p></div>
                     </div>
-                    <button
-                      className="btn-primary"
-                      onClick={confirmImport}
-                      disabled={saving}
-                    >
-                      {saving ? (
-                        <><RefreshCw className="w-4 h-4 animate-spin" />Saving...</>
-                      ) : (
-                        <><CheckCircle className="w-4 h-4" />Import {reviewTxns.length} transactions</>
-                      )}
+                    <button className="btn-primary" onClick={confirmImport} disabled={saving}>
+                      {saving ? <><RefreshCw className="w-4 h-4 animate-spin" />Saving...</> : <><CheckCircle className="w-4 h-4" />Import {reviewTxns.length} transactions</>}
                     </button>
                   </div>
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Save As Rule Modal ────────────────────────────────────────────── */}
+      {saveRuleFor && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) setSaveRuleFor(null) }}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-gray-900">Save as rule</h3>
+              <button onClick={() => setSaveRuleFor(null)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-xs text-gray-400 mb-4">This rule will auto-apply on future imports when the description contains the pattern.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="label">Pattern (description contains...)</label>
+                <input className="input" value={saveRuleForm.pattern} onChange={e => setSaveRuleForm(p => ({ ...p, pattern: e.target.value }))} placeholder="e.g. NIAGARA'S CHOICE" />
+              </div>
+              <div>
+                <label className="label">Transaction type</label>
+                <select className="input" value={saveRuleForm.transaction_type} onChange={e => setSaveRuleForm(p => ({ ...p, transaction_type: e.target.value as any }))}>
+                  <option value="expense">Expense</option>
+                  <option value="income">Income</option>
+                  <option value="transfer">Transfer</option>
+                </select>
+              </div>
+              {saveRuleForm.transaction_type !== 'transfer' && (
+                <div>
+                  <label className="label">Category</label>
+                  <select className="input" value={saveRuleForm.category_id} onChange={e => setSaveRuleForm(p => ({ ...p, category_id: e.target.value }))}>
+                    <option value="">No category</option>
+                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <input type="checkbox" id="sr_recurring" checked={saveRuleForm.is_recurring} onChange={e => setSaveRuleForm(p => ({ ...p, is_recurring: e.target.checked }))} className="rounded" />
+                  <label htmlFor="sr_recurring" className="text-sm text-gray-700">Recurring</label>
+                </div>
+                {saveRuleForm.is_recurring && (
+                  <select className="input w-auto text-sm" value={saveRuleForm.recurring_period} onChange={e => setSaveRuleForm(p => ({ ...p, recurring_period: e.target.value }))}>
+                    <option value="">Select period...</option>
+                    {PERIODS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button className="btn-primary flex-1 justify-center" onClick={saveAsRule} disabled={savingRule || !saveRuleForm.pattern}>
+                {savingRule ? 'Saving...' : 'Save rule'}
+              </button>
+              <button className="btn-secondary" onClick={() => setSaveRuleFor(null)}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
@@ -972,9 +979,7 @@ export default function TransactionsPage() {
                 <div><label className="label">Date</label><input className="input" type="date" value={newTxn.date} onChange={e => setNewTxn(p => ({ ...p, date: e.target.value }))} /></div>
                 <div><label className="label">Type</label>
                   <select className="input" value={newTxn.type} onChange={e => setNewTxn(p => ({ ...p, type: e.target.value }))}>
-                    <option value="expense">Expense</option>
-                    <option value="income">Income</option>
-                    <option value="transfer">Transfer</option>
+                    <option value="expense">Expense</option><option value="income">Income</option><option value="transfer">Transfer</option>
                   </select>
                 </div>
               </div>

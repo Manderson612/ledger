@@ -8,8 +8,25 @@ import { User, Users, CreditCard, FileSpreadsheet, Plus, Trash2, Save, CheckCirc
 
 interface Toast { message: string; type: 'success' | 'error' }
 interface AccountForm { name: string; type: string; institution: string; balance: string }
-interface Rule { id: string; pattern: string; category_id: string; category_name?: string; notes?: string }
+interface Rule {
+  id: string
+  pattern: string
+  category_id: string | null
+  category_name?: string
+  notes?: string
+  transaction_type: 'income' | 'expense' | 'transfer'
+  is_recurring: boolean
+  recurring_period: string | null
+}
 interface Category { id: string; name: string; color: string; is_income: boolean }
+
+const PERIODS = [
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'semi-monthly', label: 'Semi-monthly' },
+  { value: 'bi-weekly', label: 'Bi-weekly' },
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'annual', label: 'Annual' },
+]
 
 function SectionHeader({ icon: Icon, title, subtitle }: { icon: React.ElementType; title: string; subtitle: string }) {
   return (
@@ -27,6 +44,14 @@ function SectionHeader({ icon: Icon, title, subtitle }: { icon: React.ElementTyp
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return <div><label className="label">{label}</label>{children}</div>
+}
+
+function TypeBadge({ type }: { type: string }) {
+  const styles =
+    type === 'income' ? 'bg-emerald-50 text-emerald-700' :
+    type === 'transfer' ? 'bg-gray-100 text-gray-500' :
+    'bg-red-50 text-red-600'
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${styles}`}>{type}</span>
 }
 
 const PRESET_COLORS = ['#1D9E75','#378ADD','#EF9F27','#7F77DD','#D85A30','#D4537E','#639922','#5DCAA5','#888780','#4dab8e']
@@ -50,7 +75,11 @@ export default function SettingsPage() {
   const [rules, setRules] = useState<Rule[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [showAddRule, setShowAddRule] = useState(false)
-  const [newRule, setNewRule] = useState({ pattern: '', category_id: '', notes: '' })
+  const [newRule, setNewRule] = useState<{
+    pattern: string; category_id: string; notes: string;
+    transaction_type: 'income' | 'expense' | 'transfer';
+    is_recurring: boolean; recurring_period: string;
+  }>({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '' })
   const [showAddCategory, setShowAddCategory] = useState(false)
   const [newCategory, setNewCategory] = useState({ name: '', color: '#378ADD', is_income: false })
 
@@ -69,8 +98,8 @@ export default function SettingsPage() {
       supabase.from('categories').select('*').eq('user_id', user.id).order('name'),
     ])
     if (incomeRows) {
-      const primary = incomeRows.find(r => r.person === 'primary')
-      const partner = incomeRows.find(r => r.person === 'partner')
+      const primary = incomeRows.find((r: any) => r.person === 'primary')
+      const partner = incomeRows.find((r: any) => r.person === 'partner')
       if (primary) setPrimaryIncome(primary)
       if (partner) setPartnerIncome(partner)
     }
@@ -141,16 +170,22 @@ export default function SettingsPage() {
   }
 
   async function addRule() {
-    if (!newRule.pattern || !newRule.category_id) return
+    if (!newRule.pattern.trim()) return
+    if (newRule.transaction_type !== 'transfer' && !newRule.category_id) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { data, error } = await supabase.from('category_rules').insert({
-      user_id: user.id, pattern: newRule.pattern,
-      category_id: newRule.category_id, notes: newRule.notes || null,
+      user_id: user.id,
+      pattern: newRule.pattern.trim(),
+      category_id: newRule.transaction_type === 'transfer' ? null : newRule.category_id || null,
+      notes: newRule.notes || null,
+      transaction_type: newRule.transaction_type,
+      is_recurring: newRule.is_recurring,
+      recurring_period: newRule.is_recurring && newRule.recurring_period ? newRule.recurring_period : null,
     }).select('*, category:categories(name)').single()
     if (error) { showToast(error.message, 'error'); return }
     setRules(prev => [...prev, { ...data, category_name: (data as any).category?.name }])
-    setNewRule({ pattern: '', category_id: '', notes: '' })
+    setNewRule({ pattern: '', category_id: '', notes: '', transaction_type: 'expense', is_recurring: false, recurring_period: '' })
     setShowAddRule(false)
     showToast('Rule added')
   }
@@ -293,35 +328,91 @@ export default function SettingsPage() {
 
       {/* Category Rules */}
       <div className="card">
-        <SectionHeader icon={Brain} title="Category Rules" subtitle="AI uses these rules when categorizing imported transactions" />
+        <SectionHeader icon={Brain} title="Category Rules" subtitle="Rules are applied automatically when importing — AI only handles unmatched transactions" />
+
         {rules.length > 0 && (
           <div className="mb-4 border border-gray-100 rounded-lg overflow-hidden">
             {rules.map((r, i) => (
-              <div key={r.id} className={`flex items-center justify-between px-4 py-3 ${i < rules.length - 1 ? 'border-b border-gray-100' : ''}`}>
-                <div>
-                  <p className="text-sm font-medium text-gray-800">{r.pattern}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">→ {r.category_name}{r.notes ? ` · ${r.notes}` : ''}</p>
+              <div key={r.id} className={`flex items-start justify-between px-4 py-3 ${i < rules.length - 1 ? 'border-b border-gray-100' : ''}`}>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-gray-800">{r.pattern}</p>
+                    <TypeBadge type={r.transaction_type || 'expense'} />
+                    {r.is_recurring && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand-50 text-brand-600 font-medium">
+                        {r.recurring_period || 'recurring'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    → {r.transaction_type === 'transfer' ? 'Transfer (no category)' : r.category_name || 'No category'}
+                    {r.notes ? ` · ${r.notes}` : ''}
+                  </p>
                 </div>
-                <button onClick={() => deleteRule(r.id)} className="text-gray-300 hover:text-red-400 transition-colors"><Trash2 className="w-4 h-4" /></button>
+                <button onClick={() => deleteRule(r.id)} className="text-gray-300 hover:text-red-400 transition-colors ml-4 flex-shrink-0"><Trash2 className="w-4 h-4" /></button>
               </div>
             ))}
           </div>
         )}
+
         {showAddRule ? (
-          <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+          <div className="border border-gray-200 rounded-lg p-4 space-y-4">
             <p className="text-sm font-medium text-gray-700">Add rule</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Field label="Pattern (merchant name or keyword)"><input className="input" placeholder="e.g. Wegmans" value={newRule.pattern} onChange={e => setNewRule(p => ({ ...p, pattern: e.target.value }))} /></Field>
-              <Field label="Category">
-                <select className="input" value={newRule.category_id} onChange={e => setNewRule(p => ({ ...p, category_id: e.target.value }))}>
-                  <option value="">Select category</option>
-                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              <Field label="Pattern (merchant name or keyword)">
+                <input className="input" placeholder="e.g. NIAGARA'S CHOICE" value={newRule.pattern} onChange={e => setNewRule(p => ({ ...p, pattern: e.target.value }))} />
+              </Field>
+              <Field label="Transaction type">
+                <select className="input" value={newRule.transaction_type} onChange={e => setNewRule(p => ({ ...p, transaction_type: e.target.value as any, category_id: '' }))}>
+                  <option value="expense">Expense</option>
+                  <option value="income">Income</option>
+                  <option value="transfer">Transfer</option>
                 </select>
               </Field>
-              <Field label="Notes (optional)"><input className="input" placeholder="e.g. Car payment" value={newRule.notes} onChange={e => setNewRule(p => ({ ...p, notes: e.target.value }))} /></Field>
+              {newRule.transaction_type !== 'transfer' && (
+                <Field label="Category">
+                  <select className="input" value={newRule.category_id} onChange={e => setNewRule(p => ({ ...p, category_id: e.target.value }))}>
+                    <option value="">Select category</option>
+                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </Field>
+              )}
+              <Field label="Notes (optional)">
+                <input className="input" placeholder="e.g. Car payment" value={newRule.notes} onChange={e => setNewRule(p => ({ ...p, notes: e.target.value }))} />
+              </Field>
             </div>
+
+            {/* Recurring toggle */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox" id="rule_recurring"
+                  checked={newRule.is_recurring}
+                  onChange={e => setNewRule(p => ({ ...p, is_recurring: e.target.checked }))}
+                  className="rounded border-gray-300"
+                />
+                <label htmlFor="rule_recurring" className="text-sm text-gray-700">Recurring</label>
+              </div>
+              {newRule.is_recurring && (
+                <select
+                  className="input w-auto text-sm"
+                  value={newRule.recurring_period}
+                  onChange={e => setNewRule(p => ({ ...p, recurring_period: e.target.value }))}
+                >
+                  <option value="">Select period...</option>
+                  {PERIODS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              )}
+            </div>
+
             <div className="flex gap-2">
-              <button className="btn-primary" onClick={addRule}><Plus className="w-4 h-4" />Add rule</button>
+              <button
+                className="btn-primary"
+                onClick={addRule}
+                disabled={!newRule.pattern || (newRule.transaction_type !== 'transfer' && !newRule.category_id)}
+              >
+                <Plus className="w-4 h-4" />Add rule
+              </button>
               <button className="btn-secondary" onClick={() => setShowAddRule(false)}>Cancel</button>
             </div>
           </div>
@@ -335,7 +426,8 @@ export default function SettingsPage() {
         <SectionHeader icon={FileSpreadsheet} title="CSV Import Mappings" subtitle="How Ledger reads your bank export files" />
         <div className="space-y-4">
           {[
-            { name: 'Capital One', badge: 'Checking / Savings', badgeClass: 'badge-blue', cols: [['Date','Transaction Date'],['Description','Transaction Description'],['Amount','Transaction Amount'],['Type','Transaction Type']], tip: 'Capital One online → Account → Transactions → Download → CSV' },
+            { name: 'Capital One Checking', badge: 'Checking', badgeClass: 'badge-blue', cols: [['Date','Transaction Date'],['Description','Transaction Description'],['Amount','Transaction Amount'],['Type','Transaction Type']], tip: 'Capital One online → Account → Transactions → Download → CSV' },
+            { name: 'Capital One Cards', badge: 'Savor / Quicksilver', badgeClass: 'badge-gray', cols: [['Date','Transaction Date'],['Description','Description'],['Debit','Debit'],['Credit','Credit']], tip: 'Capital One online → Account → Transactions → Download → CSV' },
             { name: 'Apple Card', badge: 'Credit', badgeClass: 'badge-gray', cols: [['Date','Transaction Date'],['Description','Merchant'],['Amount','Amount (USD)'],['Type','Type']], tip: 'Wallet app → Apple Card → tap month → Export Transactions → CSV' },
           ].map(bank => (
             <div key={bank.name} className="border border-gray-100 rounded-lg overflow-hidden">
